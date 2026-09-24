@@ -1,66 +1,30 @@
-name: Build IPA from your own Spotify IPA
+- name: Download IPA
+  env:
+    IPA_URL: ${{ inputs.ipa_url }}
+  run: |
+    set -euo pipefail
 
-on:
-  workflow_dispatch:
-    inputs:
-      ipa_url:
-        description: "Direct link to a decrypted Spotify IPA"
-        required: true
-        type: string
-      upload_method:
-        description: "Where to put the result"
-        default: artifacts
-        type: choice
-        options: [artifacts, filebin, both]
+    mkdir -p ipa
 
-env:
-  THEOS: ${{ github.workspace }}/theos
+    curl --fail --location --silent --show-error \
+      --retry 3 \
+      --connect-timeout 20 \
+      --output ipa/spotify.ipa \
+      "$IPA_URL"
 
-jobs:
-  build:
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v5
+    if [[ ! -s ipa/spotify.ipa ]]; then
+      echo "::error::The download was empty"
+      exit 1
+    fi
 
-      - uses: levibostian/action-hide-sensitive-inputs@v1
+    if ! unzip -tq ipa/spotify.ipa >/dev/null 2>&1; then
+      echo "::error::The URL did not return a valid IPA/ZIP archive"
+      echo "Downloaded response:"
+      file ipa/spotify.ipa
+      exit 1
+    fi
 
-      - uses: maxim-lobanov/setup-xcode@v1
-        with:
-          xcode-version: latest-stable
-
-      - uses: actions/checkout@v5
-        with:
-          repository: theos/theos
-          path: theos
-          submodules: recursive
-
-      - name: Install tools
-        run: |
-          brew install make dpkg ldid
-          python3 -m pip install --break-system-packages git+https://github.com/asdfzxcvbn/pyzule-rw.git
-
-      - name: Download IPA
-        run: |
-          mkdir -p ipa
-          curl -fsSL "${{ inputs.ipa_url }}" -o ipa/spotify.ipa
-          case "$(file --mime-type -b ipa/spotify.ipa)" in application/zip|application/x-ios-app) ;; *) echo "::error::Not an IPA"; exit 1 ;; esac
-
-      - run: make release
-
-      - uses: actions/upload-artifact@v5
-        if: inputs.upload_method != 'filebin'
-        with:
-          name: spoti.ipa
-          path: out/*.ipa
-          if-no-files-found: error
-
-      - name: Upload to filebin.net
-        if: inputs.upload_method != 'artifacts'
-        run: |
-          BIN="spotifyglass-${{ github.run_id }}"
-          echo "### filebin.net download" >> "$GITHUB_STEP_SUMMARY"
-          for f in out/*.ipa; do
-            curl -fsS -X POST -H "Content-Type: application/octet-stream" --data-binary "@$f" "https://filebin.net/$BIN/$(basename "$f")" >/dev/null
-            echo "- https://filebin.net/$BIN/$(basename "$f")" >> "$GITHUB_STEP_SUMMARY"
-          done
-          echo "- _filebin deletes bins after a few days of inactivity, download promptly._" >> "$GITHUB_STEP_SUMMARY"
+    if ! unzip -l ipa/spotify.ipa | grep -Eq 'Payload/[^/]+\.app/'; then
+      echo "::error::The ZIP does not contain a Payload/*.app bundle"
+      exit 1
+    fi
